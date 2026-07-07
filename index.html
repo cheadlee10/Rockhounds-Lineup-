@@ -1,0 +1,791 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Rockhounds Lineup</title>
+<meta name="theme-color" content="#255C42">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Rockhounds">
+<link rel="apple-touch-icon" href="icon.png">
+<link rel="icon" href="icon.png">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect } = React;
+
+// ---------- constants ----------
+const POSITIONS = ["P", "C", "1B", "2B", "3B", "SS", "LF", "LC", "CF", "RC", "RF"];
+const OF = new Set(["LF", "LC", "CF", "RC", "RF"]);
+const FILL_PRIORITY = ["P", "C", "1B", "2B", "3B", "SS", "LF", "RF", "CF", "LC", "RC"];
+const POS_LABELS = {
+  P: "Pitcher", C: "Catcher", "1B": "1st Base", "2B": "2nd Base", "3B": "3rd Base",
+  SS: "Shortstop", LF: "Left Field", LC: "Left Center", CF: "Center Field",
+  RC: "Right Center", RF: "Right Field",
+};
+const KEY = "rockhounds-lineup-v1";
+const SEASON_GAMES = 10;
+const DEFAULT_ROSTER = [
+  "Theo", "Chase", "Wallace", "Dylan", "Parker", "Dominic", "Avery",
+  "Jack", "James", "Lucian", "Emmett", "Griffin", "Miles", "Nolan",
+].map((name, i) => ({ id: "seed" + (i + 1), name }));
+
+// scorebook palette
+const C = {
+  bg: "#F1F5EE",
+  card: "#FAFCF8",
+  ink: "#1C352A",
+  faint: "#5C7265",
+  line: "#C9D8C6",
+  green: "#255C42",
+  out: "#A63A22",
+  gold: "#E9B948",
+  goldSoft: "#FBEFD2",
+  benchBg: "#E7EDE4",
+};
+
+// ---------- season stats from saved games ----------
+function computeStats(games) {
+  const s = {};
+  const ensure = (id) =>
+    (s[id] ||= { gp: 0, sits: 0, dbl: 0, inf: 0, of: 0, pos: {} });
+  for (const g of games) {
+    const gameSits = {};
+    for (const id of g.attend) {
+      ensure(id).gp += 1;
+      gameSits[id] = 0;
+    }
+    for (const inn of g.innings) {
+      const playing = new Set(Object.values(inn).filter(Boolean));
+      for (const [pos, id] of Object.entries(inn)) {
+        if (!id) continue;
+        const st = ensure(id);
+        st.pos[pos] = (st.pos[pos] || 0) + 1;
+        if (OF.has(pos)) st.of += 1;
+        else st.inf += 1;
+      }
+      for (const id of g.attend)
+        if (!playing.has(id)) {
+          ensure(id).sits += 1;
+          gameSits[id] += 1;
+        }
+    }
+    for (const id of g.attend) if (gameSits[id] >= 2) ensure(id).dbl += 1;
+  }
+  return s;
+}
+
+// ---------- lineup generator ----------
+function generateGame(attendIds, gameNum, roster, otherGames) {
+  const stats = computeStats(otherGames);
+  const n = attendIds.length;
+  const posList = n >= 11 ? POSITIONS : FILL_PRIORITY.slice(0, n);
+  const sitCount = Math.max(0, n - posList.length);
+
+  const innings = [];
+  const sitsGame = Object.fromEntries(attendIds.map((id) => [id, 0]));
+  const gamePos = Object.fromEntries(attendIds.map((id) => [id, {}]));
+  let last = {}; // id -> position code or "SIT"
+
+  for (let i = 0; i < 6; i++) {
+    const jit = Object.fromEntries(attendIds.map((id) => [id, Math.random()]));
+
+    // pick sitters: never back-to-back, everyone sits once before anyone twice,
+    // then lowest season sit load
+    let sitters = [];
+    if (sitCount > 0) {
+      const ranked = [...attendIds].sort(
+        (a, b) =>
+          (last[a] === "SIT" ? 1 : 0) - (last[b] === "SIT" ? 1 : 0) ||
+          sitsGame[a] - sitsGame[b] ||
+          (stats[a]?.sits || 0) + (stats[a]?.dbl || 0) -
+            ((stats[b]?.sits || 0) + (stats[b]?.dbl || 0)) ||
+          jit[a] - jit[b]
+      );
+      sitters = ranked.slice(0, sitCount);
+    }
+    const sitSet = new Set(sitters);
+    const playing = attendIds.filter((id) => !sitSet.has(id));
+
+    // score: avoid repeating a position within the game, balance across season
+    const score = (id, pos) =>
+      (gamePos[id][pos] || 0) * 1000 + (stats[id]?.pos?.[pos] || 0) * 10 + jit[id];
+
+    const assign = {};
+    const used = new Set();
+    const ifSpots = posList.filter((p) => !OF.has(p));
+
+    // kids who played outfield last inning must go infield this inning
+    const restricted = playing.filter((id) => OF.has(last[id]));
+    for (const kid of restricted) {
+      const open = ifSpots.filter((p) => !(p in assign));
+      const pool = open.length ? open : posList.filter((p) => !(p in assign));
+      const best = [...pool].sort((a, b) => score(kid, a) - score(kid, b))[0];
+      assign[best] = kid;
+      used.add(kid);
+    }
+    for (const p of posList) {
+      if (p in assign) continue;
+      const cands = playing.filter((id) => !used.has(id));
+      if (!cands.length) break;
+      const best = [...cands].sort((a, b) => score(a, p) - score(b, p))[0];
+      assign[p] = best;
+      used.add(best);
+    }
+
+    const next = {};
+    for (const id of sitters) {
+      next[id] = "SIT";
+      sitsGame[id] += 1;
+    }
+    for (const [p, id] of Object.entries(assign)) {
+      next[id] = p;
+      gamePos[id][p] = (gamePos[id][p] || 0) + 1;
+    }
+    last = next;
+    innings.push(assign);
+  }
+
+  // batting order: full roster rotated by 3 spots per game, absent kids skipped
+  const ids = roster.map((r) => r.id);
+  const shift = ids.length ? ((gameNum - 1) * 3) % ids.length : 0;
+  const batting = [...ids.slice(shift), ...ids.slice(0, shift)].filter((id) =>
+    attendIds.includes(id)
+  );
+
+  return {
+    num: gameNum,
+    date: new Date().toISOString().slice(0, 10),
+    attend: attendIds,
+    batting,
+    innings,
+  };
+}
+
+// ---------- app ----------
+function RockhoundsLineup() {
+  const [loaded, setLoaded] = useState(false);
+  const [roster, setRoster] = useState([]);
+  const [games, setGames] = useState([]);
+  const [view, setView] = useState("game"); // game | roster | stats
+  const [phase, setPhase] = useState("list"); // list | att | lineup
+  const [outIds, setOutIds] = useState([]);
+  const [attNum, setAttNum] = useState(1);
+  const [draft, setDraft] = useState(null);
+  const [curInning, setCurInning] = useState(0);
+  const [sel, setSel] = useState(null); // swap selection {id, pos|null}
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [bulk, setBulk] = useState("");
+  const [armDelete, setArmDelete] = useState(null);
+  const [expanded, setExpanded] = useState(null);
+
+  useEffect(() => {
+    let found = false;
+    try {
+      const raw = localStorage.getItem(KEY);
+      if (raw) {
+        const d = JSON.parse(raw);
+        if (Array.isArray(d.roster) && d.roster.length) {
+          setRoster(d.roster);
+          found = true;
+        }
+        if (Array.isArray(d.games)) setGames(d.games);
+      }
+    } catch (e) {
+      // first run — nothing saved yet
+    }
+    if (!found) setRoster(DEFAULT_ROSTER);
+    setLoaded(true);
+  }, []);
+
+  const persist = (r, g) => {
+    try {
+      localStorage.setItem(KEY, JSON.stringify({ roster: r, games: g }));
+    } catch (e) {
+      console.error("save failed", e);
+    }
+  };
+
+  const nameOf = (id) => roster.find((r) => r.id === id)?.name || "—";
+  const stats = computeStats(games);
+
+  // ---------- roster actions ----------
+  const addBulk = () => {
+    const names = bulk.split("\n").map((s) => s.trim()).filter(Boolean);
+    if (!names.length) return;
+    const next = [
+      ...roster,
+      ...names.map((name, i) => ({ id: "k" + Date.now() + "_" + i, name })),
+    ];
+    setRoster(next);
+    setBulk("");
+    persist(next, games);
+  };
+  const renameKid = (id, name) => {
+    const next = roster.map((r) => (r.id === id ? { ...r, name } : r));
+    setRoster(next);
+    persist(next, games);
+  };
+  const removeKid = (id) => {
+    const next = roster.filter((r) => r.id !== id);
+    setRoster(next);
+    persist(next, games);
+  };
+
+  // ---------- game actions ----------
+  const startNew = () => {
+    const nums = games.map((g) => g.num);
+    setAttNum(nums.length ? Math.max(...nums) + 1 : 1);
+    setOutIds([]);
+    setPhase("att");
+  };
+  const editAttendance = () => {
+    if (!draft) return;
+    setAttNum(draft.num);
+    setOutIds(roster.map((r) => r.id).filter((id) => !draft.attend.includes(id)));
+    setPhase("att");
+  };
+  const runGenerate = () => {
+    const attend = roster.map((r) => r.id).filter((id) => !outIds.includes(id));
+    if (attend.length < 2) return;
+    const others = games.filter((g) => g.num !== attNum);
+    const d = generateGame(attend, attNum, roster, others);
+    setDraft(d);
+    setCurInning(0);
+    setSel(null);
+    setPhase("lineup");
+  };
+  const regenerate = () => {
+    if (!draft) return;
+    const others = games.filter((g) => g.num !== draft.num);
+    const d = generateGame(draft.attend, draft.num, roster, others);
+    setDraft(d);
+    setSel(null);
+  };
+  const saveGame = () => {
+    if (!draft) return;
+    const next = [...games.filter((g) => g.num !== draft.num), draft].sort(
+      (a, b) => a.num - b.num
+    );
+    setGames(next);
+    persist(roster, next);
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 1500);
+  };
+  const openGame = (g) => {
+    setDraft(g);
+    setCurInning(0);
+    setSel(null);
+    setPhase("lineup");
+  };
+  const deleteGame = (num) => {
+    const next = games.filter((g) => g.num !== num);
+    setGames(next);
+    persist(roster, next);
+    setArmDelete(null);
+  };
+
+  // ---------- swap ----------
+  const tapRow = (id, pos) => {
+    if (!draft) return;
+    if (!sel) {
+      setSel({ id, pos });
+      return;
+    }
+    if (sel.id === id) {
+      setSel(null);
+      return;
+    }
+    const inn = { ...draft.innings[curInning] };
+    if (sel.pos && pos) {
+      inn[sel.pos] = id;
+      inn[pos] = sel.id;
+    } else if (sel.pos && !pos) {
+      inn[sel.pos] = id; // bench kid takes the spot, sel.id goes to bench
+    } else if (!sel.pos && pos) {
+      inn[pos] = sel.id;
+    }
+    const innings = draft.innings.map((x, i) => (i === curInning ? inn : x));
+    setDraft({ ...draft, innings });
+    setSel(null);
+  };
+
+  // ---------- derived for lineup view ----------
+  const benchFor = (inningIdx) => {
+    if (!draft) return [];
+    const playing = new Set(Object.values(draft.innings[inningIdx]).filter(Boolean));
+    return draft.attend.filter((id) => !playing.has(id));
+  };
+  const sitsSoFar = (id, throughIdx) => {
+    if (!draft) return 0;
+    let c = 0;
+    for (let i = 0; i <= throughIdx; i++) {
+      const playing = new Set(Object.values(draft.innings[i]).filter(Boolean));
+      if (draft.attend.includes(id) && !playing.has(id)) c++;
+    }
+    return c;
+  };
+
+  if (!loaded)
+    return (
+      <div style={{ background: C.bg, color: C.faint }} className="min-h-screen flex items-center justify-center font-mono text-sm">
+        Loading roster…
+      </div>
+    );
+
+  // ---------- shared UI bits ----------
+  const TabBtn = ({ id, label }) => (
+    <button
+      onClick={() => setView(id)}
+      className="flex-1 py-3 font-mono text-xs tracking-widest uppercase"
+      style={{
+        color: view === id ? C.ink : C.faint,
+        borderBottom: view === id ? `3px solid ${C.green}` : `3px solid transparent`,
+        background: "transparent",
+      }}
+    >
+      {label}
+    </button>
+  );
+
+  const Btn = ({ onClick, children, kind = "solid", disabled }) => (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="px-4 py-3 rounded font-semibold text-sm w-full"
+      style={
+        kind === "solid"
+          ? { background: disabled ? C.line : C.green, color: "#fff" }
+          : { background: "transparent", color: C.green, border: `1.5px solid ${C.green}` }
+      }
+    >
+      {children}
+    </button>
+  );
+
+  return (
+    <React.Fragment>
+      <style>{`
+        .print-sheet { display: none; }
+        @media print {
+          body { background: #fff !important; }
+          .no-print { display: none !important; }
+          .print-sheet { display: block !important; }
+        }
+      `}</style>
+      {draft && (
+        <div
+          className="print-sheet"
+          style={{
+            background: "#fff",
+            color: "#000",
+            padding: "32px",
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+          }}
+        >
+          <div style={{ fontSize: "13px", letterSpacing: "3px" }}>
+            ROCKHOUNDS · GAME {draft.num} · {draft.date}
+          </div>
+          <div
+            style={{
+              fontSize: "30px",
+              fontWeight: 800,
+              margin: "6px 0 20px",
+              fontFamily: "system-ui, -apple-system, sans-serif",
+            }}
+          >
+            Batting Order
+          </div>
+          {draft.batting.map((id, i) => (
+            <div
+              key={id}
+              style={{
+                display: "flex",
+                gap: "16px",
+                fontSize: "24px",
+                padding: "7px 0",
+                borderBottom: "1px solid #ccc",
+              }}
+            >
+              <span style={{ width: "48px", textAlign: "right" }}>{i + 1}:</span>
+              <span style={{ fontFamily: "system-ui, -apple-system, sans-serif", fontWeight: 700 }}>
+                {nameOf(id)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ background: C.bg, color: C.ink }} className="min-h-screen pb-10 no-print">
+      {/* header */}
+      <div style={{ background: C.green, color: "#F4F8F2" }} className="px-4 pt-5 pb-3">
+        <div className="font-mono text-xs tracking-widest opacity-80">LINEUP CARD</div>
+        <div className="text-2xl font-bold tracking-tight">Rockhounds</div>
+      </div>
+      <div style={{ background: C.card, borderBottom: `1px solid ${C.line}` }} className="flex sticky top-0 z-10">
+        <TabBtn id="game" label="Games" />
+        <TabBtn id="roster" label="Roster" />
+        <TabBtn id="stats" label="Season" />
+      </div>
+
+      {/* ============ GAMES ============ */}
+      {view === "game" && phase === "list" && (
+        <div className="px-4 pt-4 flex flex-col gap-3">
+          <div className="font-mono text-xs" style={{ color: C.faint }}>
+            {games.length} of {SEASON_GAMES} games saved
+          </div>
+          {games.map((g) => (
+            <div
+              key={g.num}
+              className="flex items-stretch rounded overflow-hidden"
+              style={{ background: C.card, border: `1px solid ${C.line}` }}
+            >
+              <button onClick={() => openGame(g)} className="flex-1 text-left px-4 py-3">
+                <div className="font-bold">Game {g.num}</div>
+                <div className="font-mono text-xs" style={{ color: C.faint }}>
+                  {g.date} · {g.attend.length} played
+                </div>
+              </button>
+              <button
+                onClick={() =>
+                  armDelete === g.num ? deleteGame(g.num) : setArmDelete(g.num)
+                }
+                className="px-4 font-mono text-xs"
+                style={{ color: armDelete === g.num ? "#fff" : C.out, background: armDelete === g.num ? C.out : "transparent" }}
+              >
+                {armDelete === g.num ? "sure?" : "✕"}
+              </button>
+            </div>
+          ))}
+          {roster.length === 0 ? (
+            <div className="text-sm py-6 text-center" style={{ color: C.faint }}>
+              Add your kids on the Roster tab first.
+            </div>
+          ) : (
+            <Btn onClick={startNew}>New game</Btn>
+          )}
+        </div>
+      )}
+
+      {view === "game" && phase === "att" && (
+        <div className="px-4 pt-4 flex flex-col gap-3">
+          <div className="font-bold text-lg">Game {attNum} — who's out?</div>
+          <div className="font-mono text-xs" style={{ color: C.faint }}>
+            Tap anyone who can't make it.
+          </div>
+          <div className="flex flex-col gap-2">
+            {roster.map((r) => {
+              const isOut = outIds.includes(r.id);
+              return (
+                <button
+                  key={r.id}
+                  onClick={() =>
+                    setOutIds(
+                      isOut ? outIds.filter((x) => x !== r.id) : [...outIds, r.id]
+                    )
+                  }
+                  className="flex items-center justify-between px-4 py-3 rounded text-left"
+                  style={{
+                    background: isOut ? "#F6E4DF" : C.card,
+                    border: `1px solid ${isOut ? C.out : C.line}`,
+                    color: isOut ? C.out : C.ink,
+                  }}
+                >
+                  <span className="font-semibold" style={{ textDecoration: isOut ? "line-through" : "none" }}>
+                    {r.name}
+                  </span>
+                  <span className="font-mono text-xs">{isOut ? "OUT" : "IN"}</span>
+                </button>
+              );
+            })}
+          </div>
+          {(() => {
+            const n = roster.length - outIds.length;
+            const sitPerInning = Math.max(0, n - 11);
+            const slots = sitPerInning * 6;
+            const doubles = Math.max(0, slots - n);
+            return (
+              <div className="font-mono text-xs leading-5 px-1" style={{ color: C.faint }}>
+                {n} playing · {sitPerInning} sit each inning
+                {doubles > 0 &&
+                  ` · ${doubles} kids sit twice today (never back-to-back, rotated across the season)`}
+                {n < 11 && n >= 2 && ` · short-handed: filling ${n} positions`}
+              </div>
+            );
+          })()}
+          <Btn onClick={runGenerate} disabled={roster.length - outIds.length < 2}>
+            Build lineup
+          </Btn>
+          <Btn kind="ghost" onClick={() => setPhase("list")}>
+            Back
+          </Btn>
+        </div>
+      )}
+
+      {view === "game" && phase === "lineup" && draft && (
+        <div className="px-4 pt-4 flex flex-col gap-4">
+          <div className="flex items-center justify-between">
+            <button onClick={() => setPhase("list")} className="font-mono text-xs" style={{ color: C.faint }}>
+              ← Games
+            </button>
+            <div className="font-mono text-xs" style={{ color: C.faint }}>
+              GAME {draft.num} · {draft.attend.length} PLAYING
+            </div>
+          </div>
+
+          {/* batting order */}
+          <div className="rounded p-3" style={{ background: C.card, border: `1px solid ${C.line}` }}>
+            <div className="flex items-center justify-between mb-2">
+              <div className="font-mono text-xs tracking-widest" style={{ color: C.faint }}>
+                BATTING ORDER
+              </div>
+              <button
+                onClick={() => window.print()}
+                className="font-mono text-xs px-3 py-1 rounded"
+                style={{ color: C.green, border: `1.5px solid ${C.green}` }}
+              >
+                PRINT
+              </button>
+            </div>
+            <div className="flex flex-col gap-1">
+              {draft.batting.map((id, i) => (
+                <div key={id} className="flex gap-2 text-base">
+                  <span className="font-mono w-8 text-right" style={{ color: C.faint }}>
+                    {i + 1}:
+                  </span>
+                  <span className="font-semibold">{nameOf(id)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* inning selector */}
+          <div className="grid grid-cols-6 gap-1">
+            {[0, 1, 2, 3, 4, 5].map((i) => (
+              <button
+                key={i}
+                onClick={() => {
+                  setCurInning(i);
+                  setSel(null);
+                }}
+                className="py-3 rounded font-mono font-bold"
+                style={
+                  curInning === i
+                    ? { background: C.green, color: "#fff" }
+                    : { background: C.card, color: C.faint, border: `1px solid ${C.line}` }
+                }
+              >
+                {i + 1}
+              </button>
+            ))}
+          </div>
+
+          {/* the card */}
+          <div className="rounded overflow-hidden" style={{ background: C.card, border: `1px solid ${C.line}` }}>
+            <div className="px-4 py-2 font-mono text-xs tracking-widest flex justify-between" style={{ background: C.benchBg, color: C.faint }}>
+              <span>INNING {curInning + 1}</span>
+              <span>{sel ? "TAP A SECOND KID TO SWAP" : "TAP TWO KIDS TO SWAP"}</span>
+            </div>
+            {POSITIONS.filter((p) => p in draft.innings[curInning]).map((p) => {
+              const id = draft.innings[curInning][p];
+              const selected = sel && sel.id === id && sel.pos === p;
+              return (
+                <button
+                  key={p}
+                  onClick={() => tapRow(id, p)}
+                  className="w-full flex items-center gap-3 px-4 py-3 text-left"
+                  style={{
+                    borderTop: `1px solid ${C.line}`,
+                    background: selected ? C.goldSoft : "transparent",
+                  }}
+                >
+                  <span
+                    className="font-mono font-bold text-sm w-10 text-center py-1 rounded"
+                    style={{
+                      background: OF.has(p) ? C.benchBg : C.green,
+                      color: OF.has(p) ? C.ink : "#fff",
+                    }}
+                  >
+                    {p}
+                  </span>
+                  <span className="text-xl font-bold flex-1">{nameOf(id)}</span>
+                  <span className="font-mono text-xs" style={{ color: C.faint }}>
+                    {POS_LABELS[p]}
+                  </span>
+                </button>
+              );
+            })}
+            {benchFor(curInning).length > 0 && (
+              <div style={{ borderTop: `2px solid ${C.line}`, background: C.benchBg }} className="px-4 py-3">
+                <div className="font-mono text-xs tracking-widest mb-1" style={{ color: C.faint }}>
+                  BENCH
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {benchFor(curInning).map((id) => {
+                    const selected = sel && sel.id === id && !sel.pos;
+                    const nth = sitsSoFar(id, curInning);
+                    return (
+                      <button
+                        key={id}
+                        onClick={() => tapRow(id, null)}
+                        className="px-3 py-2 rounded font-semibold text-sm"
+                        style={{
+                          background: selected ? C.goldSoft : C.card,
+                          border: `1px solid ${selected ? C.gold : C.line}`,
+                        }}
+                      >
+                        {nameOf(id)}
+                        {nth >= 2 && (
+                          <span className="font-mono text-xs ml-1" style={{ color: C.out }}>
+                            ×{nth}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="flex gap-2">
+            <Btn kind="ghost" onClick={regenerate}>
+              Reshuffle
+            </Btn>
+            <Btn onClick={saveGame}>{savedFlash ? "Saved ✓" : "Save game"}</Btn>
+          </div>
+          <button onClick={editAttendance} className="font-mono text-xs py-1" style={{ color: C.faint }}>
+            Change who's out
+          </button>
+        </div>
+      )}
+
+      {/* ============ ROSTER ============ */}
+      {view === "roster" && (
+        <div className="px-4 pt-4 flex flex-col gap-3">
+          {roster.map((r) => (
+            <div
+              key={r.id}
+              className="flex items-center rounded overflow-hidden"
+              style={{ background: C.card, border: `1px solid ${C.line}` }}
+            >
+              <input
+                value={r.name}
+                onChange={(e) => renameKid(r.id, e.target.value)}
+                className="flex-1 px-4 py-3 font-semibold bg-transparent outline-none"
+                style={{ color: C.ink }}
+              />
+              <button
+                onClick={() =>
+                  armDelete === r.id ? removeKid(r.id) : setArmDelete(r.id)
+                }
+                className="px-4 py-3 font-mono text-xs"
+                style={{
+                  color: armDelete === r.id ? "#fff" : C.out,
+                  background: armDelete === r.id ? C.out : "transparent",
+                }}
+              >
+                {armDelete === r.id ? "sure?" : "✕"}
+              </button>
+            </div>
+          ))}
+          <div className="rounded p-3" style={{ background: C.card, border: `1px solid ${C.line}` }}>
+            <div className="font-mono text-xs tracking-widest mb-2" style={{ color: C.faint }}>
+              ADD PLAYERS — ONE NAME PER LINE
+            </div>
+            <textarea
+              value={bulk}
+              onChange={(e) => setBulk(e.target.value)}
+              rows={roster.length ? 2 : 8}
+              placeholder={"Theo\nMason\nCarter\n…"}
+              className="w-full p-2 rounded text-sm outline-none"
+              style={{ background: C.bg, border: `1px solid ${C.line}`, color: C.ink }}
+            />
+            <div className="mt-2">
+              <Btn onClick={addBulk} disabled={!bulk.trim()}>
+                Add to roster
+              </Btn>
+            </div>
+          </div>
+          <div className="font-mono text-xs px-1" style={{ color: C.faint }}>
+            {roster.length} on roster
+          </div>
+        </div>
+      )}
+
+      {/* ============ SEASON ============ */}
+      {view === "stats" && (
+        <div className="px-4 pt-4 flex flex-col gap-2">
+          {games.length === 0 && (
+            <div className="text-sm py-6 text-center" style={{ color: C.faint }}>
+              Save a game and season totals show up here.
+            </div>
+          )}
+          {games.length > 0 && (
+            <React.Fragment>
+              <div className="grid gap-2 font-mono text-xs px-4" style={{ gridTemplateColumns: "1fr 2rem 2rem 2rem 2rem 2rem", color: C.faint }}>
+                <span>PLAYER</span>
+                <span className="text-right">GP</span>
+                <span className="text-right">SIT</span>
+                <span className="text-right">×2</span>
+                <span className="text-right">IF</span>
+                <span className="text-right">OF</span>
+              </div>
+              {roster.map((r) => {
+                const st = stats[r.id] || { gp: 0, sits: 0, dbl: 0, inf: 0, of: 0, pos: {} };
+                const open = expanded === r.id;
+                return (
+                  <div key={r.id} className="rounded" style={{ background: C.card, border: `1px solid ${C.line}` }}>
+                    <button
+                      onClick={() => setExpanded(open ? null : r.id)}
+                      className="w-full grid gap-2 items-center px-4 py-3 text-left"
+                      style={{ gridTemplateColumns: "1fr 2rem 2rem 2rem 2rem 2rem" }}
+                    >
+                      <span className="font-semibold text-sm truncate">{r.name}</span>
+                      <span className="font-mono text-sm text-right">{st.gp}</span>
+                      <span className="font-mono text-sm text-right">{st.sits}</span>
+                      <span className="font-mono text-sm text-right" style={{ color: st.dbl ? C.out : C.faint }}>{st.dbl}</span>
+                      <span className="font-mono text-sm text-right">{st.inf}</span>
+                      <span className="font-mono text-sm text-right">{st.of}</span>
+                    </button>
+                    {open && (
+                      <div className="px-4 pb-3 flex flex-wrap gap-1">
+                        {POSITIONS.map((p) => (
+                          <span
+                            key={p}
+                            className="font-mono text-xs px-2 py-1 rounded"
+                            style={{
+                              background: (st.pos[p] || 0) > 0 ? C.benchBg : "transparent",
+                              border: `1px solid ${C.line}`,
+                              color: (st.pos[p] || 0) > 0 ? C.ink : C.faint,
+                            }}
+                          >
+                            {p} {st.pos[p] || 0}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              <div className="font-mono text-xs px-1 pt-1 leading-5" style={{ color: C.faint }}>
+                GP games · SIT bench innings · ×2 games with a double sit · IF/OF innings played
+              </div>
+            </React.Fragment>
+          )}
+        </div>
+      )}
+      </div>
+    </React.Fragment>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<RockhoundsLineup />);
+</script>
+</body>
+</html>
