@@ -113,6 +113,29 @@ function migrateGame(g) {
   return m;
 }
 
+// ---------- merge two data blobs (multi-device safe) ----------
+function mergeData(a, b) {
+  const A = a || {};
+  const B = b || {};
+  const newer = (A.updatedAt || 0) >= (B.updatedAt || 0) ? A : B;
+  const roster =
+    (newer.roster && newer.roster.length && newer.roster) ||
+    (A.roster && A.roster.length && A.roster) ||
+    B.roster ||
+    [];
+  const sig = (g) => JSON.stringify([g.attend, g.innings, g.batting]);
+  const ordered = [...((newer === A ? A : B).games || []), ...((newer === A ? B : A).games || [])];
+  const out = [];
+  for (const g of ordered) {
+    if (out.some((x) => sig(x) === sig(g))) continue; // same game on both devices
+    let gg = { ...g };
+    while (out.some((x) => x.num === gg.num)) gg = { ...gg, num: gg.num + 1 }; // different game, same number
+    out.push(gg);
+  }
+  out.sort((x, y) => x.num - y.num);
+  return { roster, games: out.map(migrateGame), updatedAt: Date.now() };
+}
+
 // ---------- season stats from saved games ----------
 function computeStats(games) {
   const s = {};
@@ -330,18 +353,22 @@ function RockhoundsLineup() {
     if (local && Array.isArray(local.games)) setGames(local.games.map(migrateGame));
     if (!found) setRoster(DEFAULT_ROSTER);
     setLoaded(true);
-    // then check the cloud — newest copy wins
+    // then check the cloud — merge, never overwrite
     (async () => {
       const cloud = await cloudPull(tok);
       if (cloud === "ERR") return;
-      const localTime = (local && local.updatedAt) || 0;
-      if (cloud && Array.isArray(cloud.roster) && cloud.roster.length && (cloud.updatedAt || 0) > localTime) {
-        setRoster(cloud.roster);
-        setGames((cloud.games || []).map(migrateGame));
-        try { localStorage.setItem(KEY, JSON.stringify(cloud)); } catch (e) {}
-        setSyncMsg("loaded newest from cloud ✓");
-      } else if (tok && local && local.roster && (!cloud || localTime > (cloud.updatedAt || 0))) {
-        cloudPush(tok, { roster: local.roster, games: local.games || [], updatedAt: localTime || Date.now() });
+      if (cloud && Array.isArray(cloud.roster)) {
+        const merged = mergeData(cloud, local || {});
+        setRoster(merged.roster);
+        setGames(merged.games);
+        try { localStorage.setItem(KEY, JSON.stringify(merged)); } catch (e) {}
+        if (tok && JSON.stringify(merged.games) !== JSON.stringify((cloud.games || []).map(migrateGame))) {
+          cloudPush(tok, merged); // this device had games the cloud didn't
+        } else {
+          setSyncMsg("in sync ✓");
+        }
+      } else if (tok && local && local.roster) {
+        cloudPush(tok, { roster: local.roster, games: local.games || [], updatedAt: local.updatedAt || Date.now() });
       }
     })();
   }, []);
@@ -415,15 +442,28 @@ function RockhoundsLineup() {
     _pushTimer = setTimeout(() => cloudPush(token, stamped), 2500);
   };
 
-  const saveToken = (t) => {
+  const saveToken = async (t) => {
     const v = t.trim();
     setToken(v);
     try {
       if (v) localStorage.setItem(KEY + ":ghtoken", v);
       else localStorage.removeItem(KEY + ":ghtoken");
     } catch (e) {}
-    if (v) cloudPush(v, { roster, games, updatedAt: Date.now() });
-    else setSyncMsg("");
+    if (!v) {
+      setSyncMsg("");
+      return;
+    }
+    setSyncMsg("checking cloud…");
+    const cloud = await cloudPull(v);
+    if (cloud === "ERR") {
+      setSyncMsg("couldn't reach cloud — check token & connection");
+      return;
+    }
+    const merged = mergeData(cloud || {}, { roster, games, updatedAt: Date.now() });
+    setRoster(merged.roster);
+    setGames(merged.games);
+    try { localStorage.setItem(KEY, JSON.stringify(merged)); } catch (e) {}
+    cloudPush(v, merged);
   };
 
   // every game change autosaves — no Save button to forget mid-game
