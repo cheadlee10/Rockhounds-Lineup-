@@ -71,10 +71,13 @@ let _pushTimer = null;
 let _dataSha = null;
 let _wakeLock = null;
 let _walkupTimer = null;
+const NOPOS_DEFAULTS = { Emmett: ["C", "1B"] };
+const normRoster = (rs) =>
+  (rs || []).map((r) => (r.noPos === undefined ? { ...r, noPos: NOPOS_DEFAULTS[r.name] || [] } : r));
 const DEFAULT_ROSTER = [
   "Theo", "Chase", "Wallace", "Dylan", "Parker", "Dominic", "Avery",
   "Jack", "James", "Lucian", "Emmett", "Griffin", "Miles", "Nolan",
-].map((name, i) => ({ id: "seed" + (i + 1), name }));
+].map((name, i) => ({ id: "seed" + (i + 1), name, noPos: NOPOS_DEFAULTS[name] || [] }));
 
 // field diagram coordinates (viewBox 0 0 100 74)
 const FIELD_XY = {
@@ -133,7 +136,7 @@ function mergeData(a, b) {
     out.push(gg);
   }
   out.sort((x, y) => x.num - y.num);
-  return { roster, games: out.map(migrateGame), updatedAt: Date.now() };
+  return { roster: normRoster(roster), games: out.map(migrateGame), updatedAt: Date.now() };
 }
 
 // ---------- season stats from saved games ----------
@@ -174,7 +177,14 @@ function computeStats(games) {
 // availability. Rules: no outfield twice in a row (bench resets it), never
 // sit back-to-back, everyone sits once before anyone sits twice, then lowest
 // season sit load, then position variety in-game and across the season.
-function buildInnings(game, startIdx, otherGames) {
+function buildInnings(game, startIdx, otherGames, roster) {
+  const blocked = {};
+  (roster || []).forEach((r) => {
+    if (r.noPos && r.noPos.length) blocked[r.id] = new Set(r.noPos);
+  });
+  const canPlay = (id, p) => !(blocked[id] && blocked[id].has(p));
+  const restrictedPos = new Set();
+  Object.values(blocked).forEach((s) => s.forEach((p) => restrictedPos.add(p)));
   const stats = computeStats(otherGames);
   const innings = game.innings.slice(0, startIdx);
   const sitsGame = {};
@@ -254,17 +264,35 @@ function buildInnings(game, startIdx, otherGames) {
     // kids who played outfield last inning must go infield this inning
     const restricted = playing.filter((id) => OF.has(last[id]));
     for (const kid of restricted) {
-      const open = ifSpots.filter((p) => !(p in assign));
-      const pool = open.length ? open : posList.filter((p) => !(p in assign));
+      const open = ifSpots.filter((p) => !(p in assign) && canPlay(kid, p));
+      const pool = open.length ? open : posList.filter((p) => !(p in assign) && canPlay(kid, p));
       if (!pool.length) break;
       const best = [...pool].sort((a, b) => score(kid, a) - score(kid, b))[0];
       assign[best] = kid;
       used.add(kid);
     }
-    for (const p of posList) {
+    // fill restricted positions first so a blocked kid is never the last resort
+    const fillOrder = [...posList].sort(
+      (a, b) => (restrictedPos.has(b) ? 1 : 0) - (restrictedPos.has(a) ? 1 : 0)
+    );
+    for (const p of fillOrder) {
       if (p in assign) continue;
-      const cands = playing.filter((id) => !used.has(id));
-      if (!cands.length) break;
+      const cands = playing.filter((id) => !used.has(id) && canPlay(id, p));
+      if (!cands.length) {
+        // repair: move an already-placed eligible kid here, give their old spot away
+        const un = playing.filter((id) => !used.has(id));
+        for (const [q, kid2] of Object.entries(assign)) {
+          if (!canPlay(kid2, p)) continue;
+          const repl = un.find((u) => canPlay(u, q));
+          if (repl) {
+            assign[p] = kid2;
+            assign[q] = repl;
+            used.add(repl);
+            break;
+          }
+        }
+        continue;
+      }
       const best = [...cands].sort((a, b) => score(a, p) - score(b, p))[0];
       assign[p] = best;
       used.add(best);
@@ -296,7 +324,7 @@ function newGame(attendIds, gameNum, roster, otherGames) {
     batting: [],
     nextUp: null,
   };
-  g.innings = buildInnings(g, 0, otherGames);
+  g.innings = buildInnings(g, 0, otherGames, roster);
   // batting: season rotation (shift 3 per game), inning-1 sitters float to the top
   const ids = roster.map((r) => r.id);
   const shift = ids.length ? ((gameNum - 1) * 3) % ids.length : 0;
@@ -331,6 +359,7 @@ function RockhoundsLineup() {
   const [walkup, setWalkup] = useState(null);
   const [soundOn, setSoundOn] = useState(true);
   const [copied, setCopied] = useState(false);
+  const [posEdit, setPosEdit] = useState(null);
 
   useEffect(() => {
     const tok = (() => {
@@ -347,7 +376,7 @@ function RockhoundsLineup() {
     }
     let found = false;
     if (local && Array.isArray(local.roster) && local.roster.length) {
-      setRoster(local.roster);
+      setRoster(normRoster(local.roster));
       found = true;
     }
     if (local && Array.isArray(local.games)) setGames(local.games.map(migrateGame));
@@ -489,6 +518,20 @@ function RockhoundsLineup() {
     setBulk("");
     persist(next, games);
   };
+  const toggleNoPos = (id, p) => {
+    const next = roster.map((r) =>
+      r.id === id
+        ? {
+            ...r,
+            noPos: (r.noPos || []).includes(p)
+              ? (r.noPos || []).filter((x) => x !== p)
+              : [...(r.noPos || []), p],
+          }
+        : r
+    );
+    setRoster(next);
+    persist(next, games);
+  };
   const renameKid = (id, name) => {
     const next = roster.map((r) => (r.id === id ? { ...r, name } : r));
     setRoster(next);
@@ -527,7 +570,7 @@ function RockhoundsLineup() {
   const reshuffle = () => {
     if (!draft) return;
     const others = games.filter((g) => g.num !== draft.num);
-    const g = { ...draft, innings: buildInnings(draft, curInning, others) };
+    const g = { ...draft, innings: buildInnings(draft, curInning, others, roster) };
     commit(g);
     setSel(null);
   };
@@ -563,7 +606,7 @@ function RockhoundsLineup() {
       if (!g.batting.includes(id)) g.batting.push(id); // slot them where you want with the arrows
     }
     const others = games.filter((x) => x.num !== g.num);
-    g.innings = buildInnings(g, curInning, others);
+    g.innings = buildInnings(g, curInning, others, roster);
     commit(g);
     setSel(null);
   };
@@ -625,7 +668,7 @@ function RockhoundsLineup() {
     const benchInvolved = (sel.pos && !pos) || (!sel.pos && pos);
     if (benchInvolved && curInning < 5) {
       const others = games.filter((x) => x.num !== g.num);
-      g = { ...g, innings: buildInnings(g, curInning + 1, others) };
+      g = { ...g, innings: buildInnings(g, curInning + 1, others, roster) };
     }
     commit(g);
     setSel(null);
@@ -670,6 +713,10 @@ function RockhoundsLineup() {
       if (arr.length > 2) issues.push(nameOf(id) + " sits " + arr.length + "× this game");
     }
     for (const [id, arr] of Object.entries(posInn)) {
+      const np = (roster.find((r) => r.id === id) || {}).noPos || [];
+      for (const [bi, bp] of arr)
+        if (np.includes(bp))
+          issues.push(nameOf(id) + " at " + bp + " (inn " + (bi + 1) + ") — blocked position");
       for (let j = 1; j < arr.length; j++) {
         const [i1, p1] = arr[j - 1];
         const [i2, p2] = arr[j];
@@ -790,7 +837,7 @@ function RockhoundsLineup() {
       try {
         const d = JSON.parse(reader.result);
         if (!Array.isArray(d.roster) || !Array.isArray(d.games)) throw new Error("bad file");
-        setRoster(d.roster);
+        setRoster(normRoster(d.roster));
         setGames(d.games.map(migrateGame));
         persist(d.roster, d.games);
         setRestoreMsg("Restored ✓");
@@ -1500,29 +1547,60 @@ function RockhoundsLineup() {
       {view === "roster" && (
         <div className="px-4 pt-4 flex flex-col gap-3">
           {roster.map((r) => (
-            <div
-              key={r.id}
-              className="flex items-center rounded overflow-hidden"
-              style={CARD}
-            >
-              <input
-                value={r.name}
-                onChange={(e) => renameKid(r.id, e.target.value)}
-                className="flex-1 px-4 py-3 font-semibold bg-transparent outline-none"
-                style={{ color: C.ink }}
-              />
-              <button
-                onClick={() =>
-                  armDelete === r.id ? removeKid(r.id) : setArmDelete(r.id)
-                }
-                className="px-4 py-3 font-mono text-xs"
-                style={{
-                  color: armDelete === r.id ? "#fff" : C.out,
-                  background: armDelete === r.id ? C.out : "transparent",
-                }}
-              >
-                {armDelete === r.id ? "sure?" : "✕"}
-              </button>
+            <div key={r.id} className="rounded overflow-hidden" style={CARD}>
+              <div className="flex items-center">
+                <input
+                  value={r.name}
+                  onChange={(e) => renameKid(r.id, e.target.value)}
+                  className="flex-1 px-4 py-3 font-semibold bg-transparent outline-none"
+                  style={{ color: C.ink }}
+                />
+                <button
+                  onClick={() => setPosEdit(posEdit === r.id ? null : r.id)}
+                  className="px-3 py-3 font-mono text-xs font-bold"
+                  style={{ color: (r.noPos || []).length ? C.out : C.green }}
+                >
+                  POS{(r.noPos || []).length ? " ✕" + (r.noPos || []).length : ""}
+                </button>
+                <button
+                  onClick={() =>
+                    armDelete === r.id ? removeKid(r.id) : setArmDelete(r.id)
+                  }
+                  className="px-4 py-3 font-mono text-xs"
+                  style={{
+                    color: armDelete === r.id ? "#fff" : C.out,
+                    background: armDelete === r.id ? C.out : "transparent",
+                  }}
+                >
+                  {armDelete === r.id ? "sure?" : "✕"}
+                </button>
+              </div>
+              {posEdit === r.id && (
+                <div className="px-4 pb-3">
+                  <div className="font-mono text-xs mb-1" style={{ color: C.faint }}>
+                    TAP A POSITION TO BLOCK IT — {r.name.toUpperCase()} WILL NEVER BE PUT THERE
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {POSITIONS.map((p) => {
+                      const off = (r.noPos || []).includes(p);
+                      return (
+                        <button
+                          key={p}
+                          onClick={() => toggleNoPos(r.id, p)}
+                          className="font-mono text-xs px-2 py-1 rounded font-bold"
+                          style={
+                            off
+                              ? { background: "#F3E0DA", border: `1px solid ${C.out}`, color: C.out, textDecoration: "line-through" }
+                              : { background: C.benchBg, border: `1px solid ${C.line}`, color: C.ink }
+                          }
+                        >
+                          {p}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           ))}
           <div className="rounded p-3" style={CARD}>
