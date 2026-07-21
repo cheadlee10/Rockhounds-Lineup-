@@ -360,6 +360,7 @@ function RockhoundsLineup() {
   const [soundOn, setSoundOn] = useState(true);
   const [copied, setCopied] = useState(false);
   const [posEdit, setPosEdit] = useState(null);
+  const [oppName, setOppName] = useState("");
 
   useEffect(() => {
     const tok = (() => {
@@ -545,6 +546,7 @@ function RockhoundsLineup() {
 
   // ---------- game actions ----------
   const startNew = () => {
+    setOppName("");
     const nums = games.map((g) => g.num);
     setAttNum(nums.length ? Math.max(...nums) + 1 : 1);
     setOutIds([]);
@@ -554,6 +556,7 @@ function RockhoundsLineup() {
     if (!draft) return;
     setAttNum(draft.num);
     setOutIds(roster.map((r) => r.id).filter((id) => !draft.attend.includes(id)));
+    setOppName(draft.opp || "");
     setPhase("att");
   };
   const runGenerate = () => {
@@ -561,6 +564,9 @@ function RockhoundsLineup() {
     if (attend.length < 2) return;
     const others = games.filter((g) => g.num !== attNum);
     const g = newGame(attend, attNum, roster, others);
+    const prevG = games.find((x) => x.num === attNum);
+    const opp = oppName.trim() || (prevG && prevG.opp) || "";
+    if (opp) g.opp = opp;
     commit(g);
     setCurInning(0);
     setSel(null);
@@ -795,11 +801,66 @@ function RockhoundsLineup() {
     triggerWalkup(next);
   };
 
+  const editOpp = () => {
+    if (!draft) return;
+    const v = window.prompt("Opponent for Game " + draft.num, draft.opp || "");
+    if (v === null) return;
+    commit({ ...draft, opp: v.trim() || undefined });
+  };
+
+  const printCards = () => {
+    const st = computeStats(games);
+    const w = window.open("", "_blank");
+    if (!w) return;
+    const cards = roster
+      .map((r) => {
+        const s = st[r.id] || { gp: 0, sits: 0, dbl: 0, inf: 0, of: 0, pos: {} };
+        const innings = s.inf + s.of;
+        const all10 = Object.keys(s.pos).length >= POSITIONS.length;
+        const chips = DISPLAY_ORDER.filter((p) => s.pos[p])
+          .map((p) => '<span class="chip">' + p + " ×" + s.pos[p] + "</span>")
+          .join("");
+        return (
+          '<div class="pc">' +
+          '<div class="band"><span class="nm">' + r.name + "</span>" +
+          (all10 ? '<span class="rib">★ ALL 10 POSITIONS</span>' : "") +
+          "</div>" +
+          '<div class="body">' +
+          '<div class="row"><b>' + s.gp + "</b> games · <b>" + innings + "</b> innings in the field · <b>" + (s.pos.P || 0) + "</b> innings pitched</div>" +
+          '<div class="row">Infield <b>' + s.inf + "</b> · Outfield <b>" + s.of + "</b> · Positions played <b>" + Object.keys(s.pos).length + "</b></div>" +
+          '<div class="chips">' + chips + "</div>" +
+          "</div></div>"
+        );
+      })
+      .join("");
+    w.document.write(
+      "<html><head><title>Rockhounds Player Cards</title>" +
+      '<link href="https://fonts.googleapis.com/css2?family=Alfa+Slab+One&family=Barlow+Condensed:wght@400;600;700&display=swap" rel="stylesheet">' +
+      "<style>" +
+      "body{margin:0;font-family:'Barlow Condensed',sans-serif;background:#fff;color:#182119}" +
+      ".hd{padding:20px 24px 8px;font-size:13px;letter-spacing:4px;border-bottom:3px double #A93B26;margin:0 24px;text-align:center}" +
+      ".grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:18px 24px}" +
+      ".pc{border:2px solid #14301F;border-radius:10px;background:#FDFAF0;page-break-inside:avoid;overflow:hidden}" +
+      ".band{background:#1E5136;color:#fff;padding:8px 12px;display:flex;justify-content:space-between;align-items:center}" +
+      ".nm{font-family:'Alfa Slab One',serif;font-size:20px;letter-spacing:.02em}" +
+      ".rib{background:#D9A03E;color:#14301F;font-weight:700;font-size:11px;padding:2px 8px;border-radius:99px;letter-spacing:.06em}" +
+      ".body{padding:10px 12px}" +
+      ".row{font-size:14px;margin-bottom:6px}" +
+      ".chips{display:flex;flex-wrap:wrap;gap:4px;border-top:1.5px dashed #A93B26;padding-top:8px}" +
+      ".chip{font-size:12px;border:1px solid #DDD5BC;background:#ECE7D3;border-radius:6px;padding:2px 6px;font-weight:600}" +
+      "</style></head><body>" +
+      '<div class="hd">ROCKHOUNDS · SUMMER BALL · PLAYER CARDS · THROUGH GAME ' + Math.max(...games.map((g) => g.num), 0) + "</div>" +
+      '<div class="grid">' + cards + "</div>" +
+      "<scr" + "ipt>setTimeout(function(){window.print()},700)</scr" + "ipt></body></html>"
+    );
+    w.document.close();
+  };
+
   // ---------- copy lineup as text ----------
   const copyLineup = async () => {
     if (!draft) return;
     const L = [];
-    L.push("ROCKHOUNDS — GAME " + draft.num + " (" + draft.date + ")");
+    L.push("ROCKHOUNDS — GAME " + draft.num + (draft.opp ? " vs " + draft.opp : "") + " (" + draft.date + ")");
     L.push("");
     L.push("BATTING:");
     draft.batting.forEach((id, i) => L.push(i + 1 + ". " + nameOf(id)));
@@ -969,7 +1030,7 @@ function RockhoundsLineup() {
             <button onClick={() => setSoundOn(!soundOn)} className="font-mono text-sm px-3 py-2 rounded" style={{ border: "1.5px solid rgba(255,255,255,.5)" }}>
               {soundOn ? "🔊" : "🔇"}
             </button>
-            <div className="font-mono text-sm opacity-80">GAME {draft.num}</div>
+            <div className="font-mono text-sm opacity-80">GAME {draft.num}{draft.opp ? " · " + draft.opp.toUpperCase() : ""}</div>
           </div>
 
           {/* jumbotron */}
@@ -1122,7 +1183,7 @@ function RockhoundsLineup() {
           }}
         >
           <div style={{ fontSize: "14px", letterSpacing: "4px", borderBottom: "3px double #A93B26", paddingBottom: "6px" }}>
-            ROCKHOUNDS · GAME {draft.num} · {draft.date}
+            ROCKHOUNDS · GAME {draft.num}{draft.opp ? " · VS " + draft.opp.toUpperCase() : ""} · {draft.date}
           </div>
           <div
             style={{
@@ -1227,7 +1288,7 @@ function RockhoundsLineup() {
               style={CARD}
             >
               <button onClick={() => openGame(g)} className="flex-1 text-left px-4 py-3">
-                <div className="font-bold">Game {g.num}</div>
+                <div className="font-bold">Game {g.num}{g.opp ? " · vs " + g.opp : ""}</div>
                 <div className="font-mono text-xs" style={{ color: C.faint }}>
                   {g.date} · {g.attend.length} played
                 </div>
@@ -1299,6 +1360,13 @@ function RockhoundsLineup() {
               </div>
             );
           })()}
+          <input
+            value={oppName}
+            onChange={(e) => setOppName(e.target.value)}
+            placeholder="Opponent (optional) — e.g. Huskies"
+            className="w-full px-4 py-3 rounded font-semibold text-sm outline-none"
+            style={{ ...CARD, color: C.ink }}
+          />
           <Btn onClick={runGenerate} disabled={roster.length - outIds.length < 2}>
             Build lineup
           </Btn>
@@ -1314,9 +1382,9 @@ function RockhoundsLineup() {
             <button onClick={() => setPhase("list")} className="font-mono text-xs" style={{ color: C.faint }}>
               ← Games
             </button>
-            <div className="font-mono text-xs" style={{ color: C.faint }}>
-              GAME {draft.num} · {(draft.availByInning[curInning] || []).length} IN THIS INNING
-            </div>
+            <button onClick={editOpp} className="font-mono text-xs text-right" style={{ color: C.faint }}>
+              GAME {draft.num}{draft.opp ? " · VS " + draft.opp.toUpperCase() : " · vs?"} · {(draft.availByInning[curInning] || []).length} IN THIS INNING
+            </button>
           </div>
 
           <Btn onClick={enterGameMode}>▶ Game Mode (big screen)</Btn>
@@ -1654,7 +1722,7 @@ function RockhoundsLineup() {
                       className="w-full grid gap-2 items-center px-4 py-3 text-left"
                       style={{ gridTemplateColumns: "1fr 2rem 2rem 2rem 2rem 2rem" }}
                     >
-                      <span className="font-semibold text-sm truncate">{r.name}</span>
+                      <span className="font-semibold text-sm truncate">{r.name}{Object.keys(st.pos || {}).length >= POSITIONS.length && <span className="font-mono ml-1 px-1 rounded" style={{ background: C.goldSoft, border: "1px solid " + C.gold, color: C.deep, fontSize: 10, fontWeight: 700, letterSpacing: ".05em", verticalAlign: "middle" }}>ALL 10</span>}</span>
                       <span className="font-mono text-sm text-right">{st.gp}</span>
                       <span className="font-mono text-sm text-right">{st.sits}</span>
                       <span className="font-mono text-sm text-right" style={{ color: st.dbl ? C.out : C.faint }}>{st.dbl}</span>
@@ -1683,6 +1751,9 @@ function RockhoundsLineup() {
               })}
               <div className="font-mono text-xs px-1 pt-1 leading-5" style={{ color: C.faint }}>
                 GP games · SIT bench innings · ×2 games with a double sit · IF/OF innings played
+              </div>
+              <div className="pt-2">
+                <Btn kind="ghost" onClick={printCards}>🖨 Print player stat cards</Btn>
               </div>
             </React.Fragment>
           )}
