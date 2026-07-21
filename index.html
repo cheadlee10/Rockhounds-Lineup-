@@ -1320,6 +1320,36 @@ function RockhoundsLineup() {
           <div className="font-mono text-xs" style={{ color: C.faint }}>
             Tap anyone who can't make it. Late arrivals: leave them OUT here, add them mid-game with Manage Players.
           </div>
+          {games.some((g) => g.num !== attNum) && (() => {
+            const st = computeStats(games.filter((g) => g.num !== attNum));
+            const here = roster.filter((r) => !outIds.includes(r.id));
+            if (!here.length) return null;
+            const load = (id) => (st[id]?.sits || 0) + (st[id]?.dbl || 0);
+            const owed = [...here].sort((a, b) => load(b.id) - load(a.id)).slice(0, 3);
+            const lean = (id) => (st[id]?.inf || 0) - (st[id]?.of || 0);
+            const ifKid = [...here].sort((a, b) => lean(b.id) - lean(a.id))[0];
+            const ofKid = [...here].sort((a, b) => lean(a.id) - lean(b.id))[0];
+            return (
+              <div className="rounded p-3 font-mono text-xs leading-5" style={{ ...CARD, color: C.faint }}>
+                <div className="tracking-widest mb-1" style={{ color: C.green }}>WHO'S OWED</div>
+                <div>
+                  Rest owed — lighter bench today:{" "}
+                  <span style={{ color: C.ink }}>
+                    {owed.map((r) => r.name + " (" + load(r.id) + ")").join(" · ")}
+                  </span>
+                </div>
+                {ifKid && ofKid && ifKid.id !== ofKid.id && (
+                  <div>
+                    Leans:{" "}
+                    <span style={{ color: C.ink }}>
+                      {ifKid.name} IF-heavy {st[ifKid.id]?.inf || 0}–{st[ifKid.id]?.of || 0} · {ofKid.name} OF-heavy {st[ofKid.id]?.inf || 0}–{st[ofKid.id]?.of || 0}
+                    </span>{" "}
+                    — engine nudges each the other way
+                  </div>
+                )}
+              </div>
+            );
+          })()}
           <div className="flex flex-col gap-2">
             {roster.map((r) => {
               const isOut = outIds.includes(r.id);
@@ -1722,7 +1752,7 @@ function RockhoundsLineup() {
                       className="w-full grid gap-2 items-center px-4 py-3 text-left"
                       style={{ gridTemplateColumns: "1fr 2rem 2rem 2rem 2rem 2rem" }}
                     >
-                      <span className="font-semibold text-sm truncate">{r.name}{Object.keys(st.pos || {}).length >= POSITIONS.length && <span className="font-mono ml-1 px-1 rounded" style={{ background: C.goldSoft, border: "1px solid " + C.gold, color: C.deep, fontSize: 10, fontWeight: 700, letterSpacing: ".05em", verticalAlign: "middle" }}>ALL 10</span>}</span>
+                      <span className="font-semibold text-sm truncate">{r.name}</span>
                       <span className="font-mono text-sm text-right">{st.gp}</span>
                       <span className="font-mono text-sm text-right">{st.sits}</span>
                       <span className="font-mono text-sm text-right" style={{ color: st.dbl ? C.out : C.faint }}>{st.dbl}</span>
