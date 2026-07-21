@@ -662,11 +662,10 @@ function RockhoundsLineup() {
     if (pos) delete pins[curInning][pos];
     const innings = draft.innings.map((x, i) => (i === curInning ? inn : x));
     let g = { ...draft, innings, pins };
-    // if the swap changed WHO SITS this inning, the rest of the game was
-    // planned around the old sitters — rebuild the remaining innings so the
-    // no-consecutive-sit and outfield rules stay true
-    const benchInvolved = (sel.pos && !pos) || (!sel.pos && pos);
-    if (benchInvolved && curInning < 5) {
+    // every swap rebalances the rest of the game — the remaining innings were
+    // planned around the old arrangement, so rebuild them to keep the
+    // no-consecutive-sit, no-repeat, and outfield rules true downstream
+    if (curInning < 5) {
       const others = games.filter((x) => x.num !== g.num);
       g = { ...g, innings: buildInnings(g, curInning + 1, others, roster) };
     }
